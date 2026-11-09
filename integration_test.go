@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/aws/smithy-go"
 	"github.com/shyim/local-s3/auth"
 	s3handler "github.com/shyim/local-s3/s3"
@@ -248,6 +249,97 @@ func TestDeleteObject(t *testing.T) {
 		Key:    aws.String("test.txt"),
 	})
 	assert.Error(t, err)
+}
+
+func TestDeleteObjects(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.TODO()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-bucket")})
+	require.NoError(t, err)
+
+	for _, key := range []string{"first.txt", "second.txt", "keep.txt"} {
+		_, err := client.PutObject(ctx, &s3.PutObjectInput{
+			Bucket: aws.String("test-bucket"),
+			Key:    aws.String(key),
+			Body:   bytes.NewReader([]byte("hello")),
+		})
+		require.NoError(t, err)
+	}
+
+	result, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: aws.String("test-bucket"),
+		Delete: &types.Delete{Objects: []types.ObjectIdentifier{
+			{Key: aws.String("first.txt")},
+			{Key: aws.String("second.txt")},
+			{Key: aws.String("missing.txt")},
+		}},
+	})
+	require.NoError(t, err)
+	require.Len(t, result.Deleted, 3)
+	assert.ElementsMatch(t, []string{"first.txt", "second.txt", "missing.txt"}, []string{
+		aws.ToString(result.Deleted[0].Key),
+		aws.ToString(result.Deleted[1].Key),
+		aws.ToString(result.Deleted[2].Key),
+	})
+	assert.Empty(t, result.Errors)
+
+	for _, key := range []string{"first.txt", "second.txt"} {
+		_, err := client.GetObject(ctx, &s3.GetObjectInput{
+			Bucket: aws.String("test-bucket"),
+			Key:    aws.String(key),
+		})
+		assert.Error(t, err)
+	}
+	object, err := client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("test-bucket"),
+		Key:    aws.String("keep.txt"),
+	})
+	require.NoError(t, err)
+	object.Body.Close()
+}
+
+func TestDeleteObjectsQuiet(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	ctx := context.TODO()
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("test-bucket")})
+	require.NoError(t, err)
+	_, err = client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String("test-bucket"),
+		Key:    aws.String("test.txt"),
+		Body:   bytes.NewReader([]byte("hello")),
+	})
+	require.NoError(t, err)
+
+	result, err := client.DeleteObjects(ctx, &s3.DeleteObjectsInput{
+		Bucket: aws.String("test-bucket"),
+		Delete: &types.Delete{Quiet: aws.Bool(true), Objects: []types.ObjectIdentifier{
+			{Key: aws.String("test.txt")},
+		}},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.Deleted)
+	assert.Empty(t, result.Errors)
+
+	_, err = client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String("test-bucket"),
+		Key:    aws.String("test.txt"),
+	})
+	assert.Error(t, err)
+}
+
+func TestDeleteObjectsMissingBucket(t *testing.T) {
+	client, cleanup := setupTestServer(t)
+	defer cleanup()
+
+	_, err := client.DeleteObjects(context.TODO(), &s3.DeleteObjectsInput{
+		Bucket: aws.String("missing-bucket"),
+		Delete: &types.Delete{Objects: []types.ObjectIdentifier{{Key: aws.String("test.txt")}}},
+	})
+	assertAPIErrorCode(t, err, "NoSuchBucket")
 }
 
 func TestListObjectsV2(t *testing.T) {

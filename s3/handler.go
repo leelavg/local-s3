@@ -71,6 +71,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.handleHeadBucket(w, r, bucket)
 		case http.MethodPut:
 			h.handleCreateBucket(w, r, account, bucket)
+		case http.MethodPost:
+			if r.URL.Query().Has("delete") {
+				h.handleDeleteObjects(w, r, account, bucket)
+				return
+			}
+			writeErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not allowed")
 		default:
 			writeErrorResponse(w, http.StatusMethodNotAllowed, "MethodNotAllowed", "Method not allowed")
 		}
@@ -369,6 +375,60 @@ func (h *Handler) handleDeleteObject(w http.ResponseWriter, _ *http.Request, acc
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) handleDeleteObjects(w http.ResponseWriter, r *http.Request, account *auth.Account, bucket string) {
+	if account != nil && !account.CanWrite() {
+		writeErrorResponse(w, http.StatusForbidden, "AccessDenied", "Write access denied")
+		return
+	}
+
+	if !h.store.BucketExists(bucket) {
+		writeErrorResponse(w, http.StatusNotFound, "NoSuchBucket", "The specified bucket does not exist")
+		return
+	}
+
+	type deleteObject struct {
+		Key string `xml:"Key"`
+	}
+	var request struct {
+		Objects []deleteObject `xml:"Object"`
+		Quiet   bool           `xml:"Quiet"`
+	}
+	if err := xml.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeErrorResponse(w, http.StatusBadRequest, "MalformedXML", "The XML you provided was not well-formed or did not validate against our published schema")
+		return
+	}
+	if len(request.Objects) > 1000 {
+		writeErrorResponse(w, http.StatusBadRequest, "InvalidRequest", "You can't delete more than 1000 objects in a single request")
+		return
+	}
+
+	type deletedObject struct {
+		Key string `xml:"Key"`
+	}
+	type deleteError struct {
+		Key     string `xml:"Key"`
+		Code    string `xml:"Code"`
+		Message string `xml:"Message"`
+	}
+	var response struct {
+		XMLName xml.Name        `xml:"DeleteResult"`
+		Xmlns   string          `xml:"xmlns,attr"`
+		Deleted []deletedObject `xml:"Deleted,omitempty"`
+		Errors  []deleteError   `xml:"Error,omitempty"`
+	}
+	response.Xmlns = "http://s3.amazonaws.com/doc/2006-03-01/"
+
+	for _, object := range request.Objects {
+		if err := h.store.DeleteObject(bucket, object.Key); err != nil {
+			response.Errors = append(response.Errors, deleteError{Key: object.Key, Code: "InternalError", Message: err.Error()})
+		} else if !request.Quiet {
+			response.Deleted = append(response.Deleted, deletedObject{Key: object.Key})
+		}
+	}
+
+	writeXMLResponse(w, http.StatusOK, response)
 }
 
 func (h *Handler) handleHeadObject(w http.ResponseWriter, _ *http.Request, bucket, key string) {
